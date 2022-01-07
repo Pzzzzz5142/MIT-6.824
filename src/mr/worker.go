@@ -1,10 +1,15 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"time"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +29,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -32,6 +36,55 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+
+	args := AssignJobArgs{}
+	reply := AssignJobReply{}
+
+	for call("Coordinator.AssignJob", &args, &reply) {
+		fmt.Println("Get ", reply.JobType)
+		switch reply.JobType {
+		case "mapping":
+			mappingOutput := fmt.Sprintf("mr-%v", reply.JobId)
+			file, err := os.Create(mappingOutput)
+			if err != nil {
+				log.Fatalf("cannot open %v", mappingOutput)
+			}
+			enc := json.NewEncoder(file)
+			for _, filename := range reply.Jobs {
+				file, err := os.Open(filename)
+				if err != nil {
+					log.Fatalf("cannot open %v", filename)
+				}
+				content, err := ioutil.ReadAll(file)
+				if err != nil {
+					log.Fatalf("cannot read %v", filename)
+				}
+				file.Close()
+				output := mapf(filename, string(content))
+				for _, v := range output {
+					err := enc.Encode(&v)
+					if err != nil {
+						log.Fatalln("cannot encode", v)
+					}
+				}
+			}
+			file.Close()
+		case "reducing":
+			ofile, _ := os.Create(fmt.Sprintf("mr-out%v", reply.JobId))
+			key := reply.Jobs[0]
+			values := reply.Jobs[1:]
+			output := reducef(key, values)
+			fmt.Fprintf(ofile, "%v %v\n", key, output)
+			ofile.Close()
+		case "quit":
+			os.Exit(0)
+		}
+
+		finishedArgs := FinishJobArgs{reply.Jobs, reply.JobType}
+		finishedReply := FinishJobReply{}
+		call("Coordinator.FinishJob", &finishedArgs, &finishedReply)
+		time.Sleep(time.Millisecond)
+	}
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
