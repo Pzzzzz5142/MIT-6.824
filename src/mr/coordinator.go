@@ -22,7 +22,8 @@ func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 type unfinishedJobs struct {
-	Jobs       []string
+	MapJobs    []string
+	ReduceJobs [][]string
 	AssignTime time.Time
 }
 
@@ -45,7 +46,7 @@ func (x *Coordinator) checkUnfinished() {
 	j := 0
 	for _, v := range x.unfinishedMap {
 		if time.Since(v.AssignTime) > time.Second*10 {
-			x.needMap = append(x.needMap, v.Jobs...)
+			x.needMap = append(x.needMap, v.MapJobs...)
 		} else {
 			x.unfinishedMap[j] = v
 			j += 1
@@ -55,7 +56,7 @@ func (x *Coordinator) checkUnfinished() {
 	j = 0
 	for _, v := range x.unfinishedReduce {
 		if time.Since(v.AssignTime) > time.Second*10 {
-			x.needReduce = append(x.needReduce, v.Jobs)
+			x.needReduce = append(x.needReduce, v.ReduceJobs...)
 		} else {
 			x.unfinishedReduce[j] = v
 			j += 1
@@ -78,7 +79,7 @@ func (x *Coordinator) AssignJob(args *AssignJobArgs, reply *AssignJobReply) erro
 			reply.MapJobs = x.needMap[:upper_bound]
 			reply.JobId = x.jobInd
 			x.needMap = x.needMap[upper_bound:]
-			x.unfinishedMap = append(x.unfinishedMap, unfinishedJobs{reply.MapJobs, time.Now()})
+			x.unfinishedMap = append(x.unfinishedMap, unfinishedJobs{reply.MapJobs, nil, time.Now()})
 			x.jobInd += 1
 		}
 	case "reduce":
@@ -90,12 +91,8 @@ func (x *Coordinator) AssignJob(args *AssignJobArgs, reply *AssignJobReply) erro
 			reply.JobId = x.jobInd
 			upper_bound := int(math.Min(float64(len(x.needReduce)), float64(x.upperbound)))
 			reply.ReduceJobs = x.needReduce[:upper_bound]
-			unfiJobs := []string{}
-			for i := 0; i < upper_bound; i++ {
-				unfiJobs = append(unfiJobs, x.needReduce[i][0])
-			}
 			x.needReduce = x.needReduce[upper_bound:]
-			x.unfinishedReduce = append(x.unfinishedReduce, unfinishedJobs{unfiJobs, time.Now()})
+			x.unfinishedReduce = append(x.unfinishedReduce, unfinishedJobs{nil, reply.ReduceJobs, time.Now()})
 			x.jobInd += 1
 		}
 	case "end":
@@ -106,14 +103,33 @@ func (x *Coordinator) AssignJob(args *AssignJobArgs, reply *AssignJobReply) erro
 	return nil
 }
 
-func remove(s *[]unfinishedJobs, thing []string) error {
+func removeMap(s *[]unfinishedJobs, thing []string) error {
 	if len(*s) == 0 {
 		return errors.New("job concidered dead")
 	}
 	j := 0
 	for i, v := range *s {
-		if v.Jobs[0] == thing[0] && i != j {
-			(*s)[j] = v
+		if v.MapJobs[0] != thing[0] {
+			if i != j {
+				(*s)[j] = v
+			}
+			j += 1
+		}
+	}
+	*s = (*s)[:j]
+	return nil
+}
+
+func removeReduce(s *[]unfinishedJobs, thing [][]string) error {
+	if len(*s) == 0 {
+		return errors.New("job concidered dead")
+	}
+	j := 0
+	for i, v := range *s {
+		if v.ReduceJobs[0][0] != thing[0][0] {
+			if i != j {
+				(*s)[j] = v
+			}
 			j += 1
 		}
 	}
@@ -124,11 +140,12 @@ func remove(s *[]unfinishedJobs, thing []string) error {
 func (x *Coordinator) FinishJob(args *FinishJobArgs, reply *FinishJobReply) error {
 	x.mux.Lock()
 	defer x.mux.Unlock()
+	x.checkUnfinished()
 	switch args.JobType {
 	case "mapping":
-		err := remove(&x.unfinishedMap, args.Jobs)
+		err := removeMap(&x.unfinishedMap, args.MapJobs)
 		if err != nil {
-			log.Print("abandoned job")
+			log.Print("abandoned job", args)
 		}
 		if len(x.needMap) == 0 && len(x.unfinishedMap) == 0 && x.state == "map" {
 			x.state = "reduce"
@@ -168,7 +185,7 @@ func (x *Coordinator) FinishJob(args *FinishJobArgs, reply *FinishJobReply) erro
 			x.upperbound = int(math.Ceil(float64(len(x.needReduce)) / float64(x.nReduce)))
 		}
 	case "reducing":
-		err := remove(&x.unfinishedReduce, args.Jobs)
+		err := removeReduce(&x.unfinishedReduce, args.ReduceJobs)
 		if err != nil {
 			log.Print("abandoned job")
 		}
@@ -211,7 +228,6 @@ func (c *Coordinator) server() {
 //
 func (c *Coordinator) Done() bool {
 	ret := false
-
 	// Your code here.
 	c.mux.Lock()
 	c.checkUnfinished()

@@ -36,13 +36,15 @@ type AssignJobReply struct {
 	JobId      int
 }
 type FinishJobArgs struct {
-	Jobs    []string
-	JobType string
+	MapJobs    []string
+	ReduceJobs [][]string
+	JobType    string
 }
 
 type FinishJobReply struct {
-	JobType string
-	Jobs    []string
+	JobType    string
+	MapJobs    []string
+	ReduceJobs [][]string
 }
 
 // Cook up a unique-ish UNIX-domain socket name
