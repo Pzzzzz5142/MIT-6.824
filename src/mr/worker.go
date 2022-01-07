@@ -42,6 +42,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	for call("Coordinator.AssignJob", &args, &reply) {
 		fmt.Println("Get ", reply.JobType)
+		fiJobs := reply.MapJobs
 		switch reply.JobType {
 		case "mapping":
 			mappingOutput := fmt.Sprintf("mr-%v", reply.JobId)
@@ -50,7 +51,8 @@ func Worker(mapf func(string, string) []KeyValue,
 				log.Fatalf("cannot open %v", mappingOutput)
 			}
 			enc := json.NewEncoder(file)
-			for _, filename := range reply.Jobs {
+			for _, filename := range reply.MapJobs {
+
 				file, err := os.Open(filename)
 				if err != nil {
 					log.Fatalf("cannot open %v", filename)
@@ -71,16 +73,21 @@ func Worker(mapf func(string, string) []KeyValue,
 			file.Close()
 		case "reducing":
 			ofile, _ := os.Create(fmt.Sprintf("mr-out%v", reply.JobId))
-			key := reply.Jobs[0]
-			values := reply.Jobs[1:]
-			output := reducef(key, values)
-			fmt.Fprintf(ofile, "%v %v\n", key, output)
+			fiJobs = []string{}
+			for _, job := range reply.ReduceJobs {
+				key := job[0]
+				fiJobs = append(fiJobs, key)
+				values := job[1:]
+				output := reducef(key, values)
+				fmt.Fprintf(ofile, "%v %v\n", key, output)
+			}
+			fmt.Println(fiJobs)
 			ofile.Close()
 		case "quit":
 			os.Exit(0)
 		}
 
-		finishedArgs := FinishJobArgs{reply.Jobs, reply.JobType}
+		finishedArgs := FinishJobArgs{fiJobs, reply.JobType}
 		finishedReply := FinishJobReply{}
 		call("Coordinator.FinishJob", &finishedArgs, &finishedReply)
 		time.Sleep(time.Millisecond)

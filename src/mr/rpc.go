@@ -30,9 +30,10 @@ type AssignJobArgs struct {
 }
 
 type AssignJobReply struct {
-	JobType string
-	Jobs    []string
-	JobId   int
+	JobType    string
+	MapJobs    []string
+	ReduceJobs [][]string
+	JobId      int
 }
 type FinishJobArgs struct {
 	Jobs    []string
