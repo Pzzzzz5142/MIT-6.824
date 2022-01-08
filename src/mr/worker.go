@@ -41,17 +41,18 @@ func Worker(mapf func(string, string) []KeyValue,
 	reply := AssignJobReply{}
 
 	for call("Coordinator.AssignJob", &args, &reply) {
-		MapJobs := reply.MapJobs
-		ReduceJobs := reply.ReduceJobs
+		mapJobs := reply.MapJobs
+		reduceJobs := reply.ReduceJobs
+		fileName := ""
 		switch reply.JobType {
 		case "mapping":
-			mappingOutput := fmt.Sprintf("mr-%v", reply.JobId)
-			file, err := os.CreateTemp(".", "*-"+mappingOutput)
+			fileName = fmt.Sprintf("mr-%v", reply.JobId)
+			file, err := os.CreateTemp(".", "*-"+fileName)
 			if err != nil {
-				log.Fatalf("cannot open %v", mappingOutput)
+				log.Fatalf("cannot open %v", fileName)
 			}
 			enc := json.NewEncoder(file)
-			for _, filename := range reply.MapJobs {
+			for _, filename := range mapJobs {
 				file, err := os.Open(filename)
 				if err != nil {
 					log.Fatalf("cannot open %v", filename)
@@ -70,24 +71,28 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 			}
 			file.Close()
-			os.Rename("./"+file.Name(), "./"+mappingOutput)
+			os.Rename("./"+file.Name(), "./"+fileName)
 		case "reducing":
-			ofile, _ := os.CreateTemp(".", "*-"+fmt.Sprintf("mr-out%v", reply.JobId))
-			for _, job := range reply.ReduceJobs {
+			fileName = fmt.Sprintf("mr-out%v", reply.JobId)
+			ofile, _ := os.CreateTemp(".", "*-"+fileName)
+			for _, job := range reduceJobs {
 				key := job[0]
 				values := job[1:]
 				output := reducef(key, values)
 				fmt.Fprintf(ofile, "%v %v\n", key, output)
 			}
 			ofile.Close()
-			os.Rename("./"+ofile.Name(), "./"+fmt.Sprintf("mr-out%v", reply.JobId))
+			os.Rename("./"+ofile.Name(), "./"+fileName)
 		case "quit":
 			os.Exit(0)
 		}
 
-		finishedArgs := FinishJobArgs{MapJobs, ReduceJobs, reply.JobType}
+		finishedArgs := FinishJobArgs{mapJobs, reduceJobs, reply.JobType, fileName}
 		finishedReply := FinishJobReply{}
 		call("Coordinator.FinishJob", &finishedArgs, &finishedReply)
+		if finishedReply.Abandoned {
+			os.Remove(fileName)
+		}
 		time.Sleep(time.Millisecond)
 	}
 

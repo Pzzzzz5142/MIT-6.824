@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -38,6 +37,7 @@ type Coordinator struct {
 	mux              sync.Mutex
 	jobInd           int
 	state            string
+	mapFiles         []string
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -116,6 +116,9 @@ func removeMap(s *[]unfinishedJobs, thing []string) error {
 			j += 1
 		}
 	}
+	if len(*s) == j {
+		return errors.New("job concidered dead")
+	}
 	*s = (*s)[:j]
 	return nil
 }
@@ -133,6 +136,9 @@ func removeReduce(s *[]unfinishedJobs, thing [][]string) error {
 			j += 1
 		}
 	}
+	if len(*s) == j {
+		return errors.New("job concidered dead")
+	}
 	*s = (*s)[:j]
 	return nil
 }
@@ -146,14 +152,15 @@ func (x *Coordinator) FinishJob(args *FinishJobArgs, reply *FinishJobReply) erro
 		err := removeMap(&x.unfinishedMap, args.MapJobs)
 		if err != nil {
 			log.Print("abandoned job", args)
+			reply.Abandoned = true
+			break
 		}
-		if len(x.needMap) == 0 && len(x.unfinishedMap) == 0 && x.state == "map" {
+		reply.Abandoned = false
+		x.mapFiles = append(x.mapFiles, args.FileName)
+		if x.state == "map" && len(x.needMap) == 0 && len(x.unfinishedMap) == 0 {
 			x.state = "reduce"
 			intermediate := []KeyValue{}
-			files, err := filepath.Glob("mr-*")
-			if err != nil {
-				log.Fatal("cannot find mr-*")
-			}
+			files := x.mapFiles
 			for _, filename := range files {
 				file, err := os.Open(filename)
 				if err != nil {
@@ -188,7 +195,10 @@ func (x *Coordinator) FinishJob(args *FinishJobArgs, reply *FinishJobReply) erro
 		err := removeReduce(&x.unfinishedReduce, args.ReduceJobs)
 		if err != nil {
 			log.Print("abandoned job")
+			reply.Abandoned = true
+			break
 		}
+		reply.Abandoned = false
 		if len(x.needReduce) == 0 && len(x.unfinishedReduce) == 0 {
 			x.state = "end"
 		}

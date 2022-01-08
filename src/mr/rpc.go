@@ -39,12 +39,14 @@ type FinishJobArgs struct {
 	MapJobs    []string
 	ReduceJobs [][]string
 	JobType    string
+	FileName   string
 }
 
 type FinishJobReply struct {
 	JobType    string
 	MapJobs    []string
 	ReduceJobs [][]string
+	Abandoned  bool
 }
 
 // Cook up a unique-ish UNIX-domain socket name
