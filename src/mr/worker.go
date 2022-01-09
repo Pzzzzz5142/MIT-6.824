@@ -89,9 +89,10 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		finishedArgs := FinishJobArgs{mapJobs, reduceJobs, reply.JobType, fileName}
 		finishedReply := FinishJobReply{}
-		call("Coordinator.FinishJob", &finishedArgs, &finishedReply)
-		if finishedReply.Abandoned {
+		ok := call("Coordinator.FinishJob", &finishedArgs, &finishedReply)
+		if !ok || finishedReply.Abandoned {
 			os.Remove(fileName)
+			break
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -133,7 +134,8 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Print("dialing:", err)
+		return false
 	}
 	defer c.Close()
 
