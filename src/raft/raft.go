@@ -56,6 +56,10 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type State int
+type Entry struct {
+	Command interface{}
+	Term    State
+}
 
 const (
 	Follower  State = 0
@@ -78,11 +82,15 @@ type Raft struct {
 	state         State
 	heartbeatDue  time.Time
 	heartbeatTime time.Time
+	log           []Entry
+	commitIndex   int
+	lastApplied   int
+	nextIndex     []int
+	matchIndex    []int
 }
 
 func getEletionTimeout() time.Duration {
-	rand.Seed(time.Now().Unix())
-	return time.Duration(150+rand.Intn(200)) * time.Millisecond
+	return time.Duration(350+rand.Intn(500)) * time.Millisecond
 }
 
 // return currentTerm and whether this server
@@ -163,8 +171,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term        int
-	CandidateId int
+	Term         int
+	CandidateId  int
+	lastLogIndex int
+	lastLogTerm  State
 }
 
 //
@@ -242,8 +252,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 type AppendEntriesArgs struct {
 	// Your data here (2A, 2B).
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	prevLogIndex int
+	prevLogTerm  State
+	entries      []Entry
+	leaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -257,6 +271,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	//DPrintf("Server %d[term %d, state %d] received AppendEntries from server %d[term %d]", rf.me, rf.currentTerm, rf.state, args.LeaderId, args.Term)
 	if rf.currentTerm < args.Term {
+		rf.currentTerm = args.Term
 		rf.becomesFollower()
 	} else if rf.currentTerm > args.Term {
 		reply.Success = false
@@ -274,7 +289,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	rf.heartbeatTime = time.Now().Add(50 * time.Millisecond)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -345,6 +359,7 @@ func (rf *Raft) ticker() {
 		} else if rf.state == Leader {
 			if rf.heartbeatTime.Before(time.Now()) {
 				term := rf.currentTerm
+				rf.heartbeatTime = time.Now().Add(100 * time.Millisecond)
 				//DPrintf("server %d[term %d] sending Heartbeats. ", rf.me, rf.currentTerm)
 				rf.mu.Unlock()
 				for i := 0; i < len(rf.peers); i++ {
@@ -362,6 +377,7 @@ func (rf *Raft) ticker() {
 						defer rf.mu.Unlock()
 						if ok {
 							if reply.Term > rf.currentTerm {
+								rf.currentTerm = reply.Term
 								rf.becomesFollower()
 								return
 							}
@@ -426,6 +442,7 @@ func (rf *Raft) startsElection() {
 					DPrintf("\033[1;32;40mServer %d[term %d] becomes leader\033[0m", rf.me, rf.currentTerm)
 					rf.state = Leader
 					term = rf.currentTerm
+					rf.heartbeatTime = time.Now().Add(50 * time.Millisecond)
 					rf.mu.Unlock()
 					defer rf.mu.Lock()
 					for i := 0; i < len(rf.peers); i++ {
@@ -444,15 +461,13 @@ func (rf *Raft) startsElection() {
 							if ok {
 								if reply.Term > rf.currentTerm {
 									DPrintf("\033[1;31;40mServer %d[term %d] downgrad to follower\033[0m", rf.me, rf.currentTerm)
+									rf.currentTerm = reply.Term
 									rf.becomesFollower()
 								}
 							}
 						}(i, term)
 					}
-				} else {
-					rf.becomesFollower()
 				}
-				return
 			}
 		}(i, term)
 	}
@@ -485,6 +500,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatDue = time.Now().Add(getEletionTimeout())
 	DPrintf("Initial heartbeatDue %s", rf.heartbeatDue.String())
 	rf.state = Follower
+	rand.Seed(int64(rf.me))
+	rf.log = append(rf.log, Entry{})
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
