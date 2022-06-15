@@ -92,7 +92,6 @@ type Raft struct {
 }
 
 func getEletionTimeout() time.Duration {
-	rand.Seed(time.Now().UnixNano())
 	return time.Duration(250+rand.Intn(150)) * time.Millisecond
 }
 
@@ -210,7 +209,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	reply.Term = rf.currentTerm
-	if (rf.votedFor == nil || *rf.votedFor == args.CandidateId) && len(rf.log)-1 == args.LastLogIndex && rf.log[len(rf.log)-1].Term == args.LastLogTerm {
+	lastLog := rf.log[len(rf.log)-1]
+	lastLogIndex := len(rf.log) - 1
+	if lastLog.Term > args.LastLogTerm {
+		reply.VoteGranted = false
+	} else if lastLog.Term == args.LastLogTerm && lastLogIndex > args.LastLogIndex {
+		reply.VoteGranted = false
+	} else if rf.votedFor == nil || rf.votedFor == &args.CandidateId {
 		reply.VoteGranted = true
 		rf.votedFor = &args.CandidateId
 	} else {
@@ -376,8 +381,8 @@ func (rf *Raft) sendNoneEmptyAppendEntries() {
 		if i == rf.me {
 			continue
 		}
-		if lastLogIndex > rf.nextIndex[i] {
-			DPrintf("Server %d's next index = %d at leader %d", i, rf.nextIndex[i], rf.me)
+		if lastLogIndex > nextIndex[i] {
+			DPrintf("Server %d's next index = %d at leader %d", i, nextIndex[i], rf.me)
 			go func(server, term, prevLogIndex int) {
 				for {
 					args := AppendEntriesArgs{
@@ -392,16 +397,15 @@ func (rf *Raft) sendNoneEmptyAppendEntries() {
 
 					ok := rf.sendAppendEntries(server, &args, reply)
 					rf.mu.Lock()
-					defer rf.mu.Unlock()
 					if done || args.Term != rf.currentTerm {
-						return
+						break
 					}
 					if ok {
 						if reply.Term > rf.currentTerm {
 							rf.currentTerm = reply.Term
 							rf.becomesFollower()
 							done = true
-							return
+							break
 						} else if reply.Success {
 							DPrintf("Follower %d[term %d] append prevLogIndex %d success to leader %d[term %d]", server, reply.Term, prevLogIndex, rf.me, rf.currentTerm)
 							newLogIndex := prevLogIndex + len(args.Entries)
@@ -426,17 +430,19 @@ func (rf *Raft) sendNoneEmptyAppendEntries() {
 									rf.commitIndex = newLogIndex
 								}
 							}
-							return
+							break
 						} else {
 							DPrintf("Leader %d enconter log inconsistency at index %d follower %d, decreasing to %d", rf.me, prevLogIndex, server, rf.nextIndex[server]-1)
 							rf.nextIndex[server]--
 							prevLogIndex--
+							rf.mu.Unlock()
 						}
 					}
 					if len(log) != len(rf.log) {
-						return
+						break
 					}
 				}
+				rf.mu.Unlock()
 			}(i, term, nextIndex[i]-1)
 		}
 	}
@@ -648,7 +654,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.heartbeatDue = time.Now().Add(getEletionTimeout())
 	rf.state = Follower
-	rand.Seed(int64(rf.me))
+	rand.Seed(int64(rf.me + int(time.Now().UnixNano())))
 	rf.log = append(rf.log, Entry{})
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
