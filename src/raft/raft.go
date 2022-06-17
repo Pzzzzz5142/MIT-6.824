@@ -89,7 +89,7 @@ type Raft struct {
 	matchIndex            []int
 	applyCh               *chan ApplyMsg
 	startHandle           *sync.Cond
-	sendAppendEntriesCond []chan int
+	sendAppendEntriesCond []*sync.Cond
 	applyCond             *sync.Cond
 }
 
@@ -394,7 +394,8 @@ func (rf *Raft) sendHeartbeat(server, term, prevLogIndex, prevLogTerm, leaderCom
 	done := false
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if done {
+	if done || args.Term != rf.currentTerm {
+		done = true
 		return
 	}
 	if ok {
@@ -409,13 +410,10 @@ func (rf *Raft) sendHeartbeat(server, term, prevLogIndex, prevLogTerm, leaderCom
 			rf.nextIndex[server]--
 			go func() {
 				DPrintf("Sending")
-				rf.sendAppendEntriesCond[server] <- 1
+				rf.sendAppendEntriesCond[server].Broadcast()
 				DPrintf("Sent")
 			}()
 		}
-	} else {
-		done = true
-		return
 	}
 }
 
@@ -426,6 +424,7 @@ func (rf *Raft) appendEntriesHandler() {
 			continue
 		}
 		go func(server int) {
+			rf.sendAppendEntriesCond[server].L.Lock()
 			for !rf.killed() {
 				rf.mu.Lock()
 				term := rf.currentTerm
@@ -442,10 +441,11 @@ func (rf *Raft) appendEntriesHandler() {
 					nextIndex[i] = rf.nextIndex[i]
 				}
 				rf.mu.Unlock()
+
 				if state != Leader || lastLogIndex <= nextIndex[server] {
 					DPrintf("Leader %d[term %d] for %d waiting.", rf.me, term, server)
-					v := <-rf.sendAppendEntriesCond[server]
-					DPrintf("Leader %d[term %d] sendAppendEntriesCond[%d] = %d", rf.me, term, server, v)
+					rf.sendAppendEntriesCond[server].Wait()
+					DPrintf("Leader %d[term %d] sendAppendEntriesCond[%d]", rf.me, term, server)
 					continue
 				}
 
@@ -465,6 +465,7 @@ func (rf *Raft) appendEntriesHandler() {
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
 					if done || args.Term != rf.currentTerm {
+						done = true
 						return
 					}
 					if ok {
@@ -501,12 +502,15 @@ func (rf *Raft) appendEntriesHandler() {
 								}
 							}
 						} else {
+							for rf.nextIndex[server] > 1 && rf.log[rf.nextIndex[server]-1].Term == args.PrevLogTerm {
+								rf.nextIndex[server]--
+							}
 							DPrintf("Leader %d enconter log inconsistency at index %d follower %d, decreasing to %d", rf.me, prevLogIndex, server, rf.nextIndex[server]-1)
-							rf.nextIndex[server]--
 						}
 					}
 				}(server, term, nextIndex[server]-1)
 			}
+			rf.sendAppendEntriesCond[server].L.Unlock()
 		}(i)
 	}
 }
@@ -542,8 +546,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		DPrintf("\033[1;32;40mLeader %d[term %d] append log %d[%d] command %v\033[0m", rf.me, term, index, len(rf.log), command)
 		for i := 0; i < len(rf.peers); i++ {
+			if rf.me == i {
+				continue
+			}
 			go func(server int) {
-				rf.sendAppendEntriesCond[server] <- 1
+				rf.sendAppendEntriesCond[server].Broadcast()
 			}(i)
 		}
 		rf.persist()
@@ -587,11 +594,10 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	for i := 0; i < len(rf.peers); i++ {
-		if i != rf.me {
-			go func(server int) {
-				rf.sendAppendEntriesCond[server] <- 1
-			}(i)
-		}
+		go func(server int) {
+			rf.sendAppendEntriesCond[server].Broadcast()
+		}(i)
+
 	}
 	rf.applyCond.Broadcast()
 	DPrintf("Server %d killed", rf.me)
@@ -605,10 +611,8 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	var term int
 	for !rf.killed() {
 		rf.mu.Lock()
-		term = rf.currentTerm
 		if rf.state == Follower {
 			// Your code here to check if a leader election should
 			// be started and to randomize sleeping time using
@@ -623,7 +627,7 @@ func (rf *Raft) ticker() {
 				rf.startsElection()
 			}
 		} else if rf.state == Leader {
-			if rf.heartbeatTime.Before(time.Now()) && rf.currentTerm == term {
+			if rf.heartbeatTime.Before(time.Now()) {
 				term := rf.currentTerm
 				rf.heartbeatTime = time.Now().Add(100 * time.Millisecond)
 				prevLogIndex := len(rf.log) - 1
@@ -679,7 +683,8 @@ func (rf *Raft) startsElection() {
 			ok := rf.sendRequestVote(server, &args, reply)
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
-			if done {
+			if done || rf.currentTerm != t {
+				done = true
 				return
 			}
 			if ok {
@@ -694,9 +699,6 @@ func (rf *Raft) startsElection() {
 				if reply.VoteGranted {
 					voted++
 				}
-			} else {
-				done = true
-				return
 			}
 			total++
 			if 2*voted >= len(rf.peers) || total == len(rf.peers) {
@@ -711,7 +713,7 @@ func (rf *Raft) startsElection() {
 						}
 						go func(server int) {
 							DPrintf("Sending leader heartbeat")
-							rf.sendAppendEntriesCond[server] <- 1
+							rf.sendAppendEntriesCond[server].Broadcast()
 							DPrintf("Sent leader heartbeat")
 						}(i)
 					}
@@ -720,6 +722,9 @@ func (rf *Raft) startsElection() {
 					prevLogTerm := rf.log[prevLogIndex].Term
 					leaderCommit := rf.commitIndex
 					for i := 0; i < len(rf.nextIndex); i++ {
+						if rf.me == i {
+							continue
+						}
 						rf.nextIndex[i] = len(rf.log)
 						DPrintf("Server %d's next index initialized to %d", i, rf.nextIndex[i])
 					}
@@ -770,10 +775,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = &applyCh
 	rf.startHandle = sync.NewCond(&rf.mu)
 	for i := 0; i < len(rf.peers); i++ {
-		rf.sendAppendEntriesCond = append(rf.sendAppendEntriesCond, make(chan int))
-		go func(a int) { rf.sendAppendEntriesCond[a] <- 1 }(i)
-		v := <-rf.sendAppendEntriesCond[i]
-		DPrintf("Server %d's sendAppendEntriesCond[%d] initialized to %d", rf.me, i, v)
+		rf.sendAppendEntriesCond = append(rf.sendAppendEntriesCond, sync.NewCond(&sync.Mutex{}))
+		DPrintf("Server %d's sendAppendEntriesCond[%d] initialized.", rf.me, i)
 	}
 	rf.appendEntriesHandler()
 	rf.applyCond = sync.NewCond(&rf.mu)
