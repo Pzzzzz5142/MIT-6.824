@@ -407,7 +407,9 @@ func (rf *Raft) sendHeartbeat(server, term, prevLogIndex, prevLogTerm, leaderCom
 			return
 		} else if !reply.Success && prevLogIndex == rf.nextIndex[server]-1 {
 			DPrintf("Leader %d[term %d] enconter log inconsistency at index %d follower %d[term %d] heartbeat, decreasing to %d", rf.me, args.Term, prevLogIndex, server, reply.Term, rf.nextIndex[server]-1)
-			rf.nextIndex[server]--
+			for rf.log[rf.nextIndex[server]-1].Term == args.PrevLogTerm {
+				rf.nextIndex[server]--
+			}
 			go func() {
 				DPrintf("Sending")
 				rf.sendAppendEntriesCond[server].Broadcast()
