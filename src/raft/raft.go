@@ -564,6 +564,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) applyHandler() {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	for !rf.killed() {
 		//DPrintf("Server %d[term %d, state %d] checking lastApplied %d and commitIndex %d", rf.me, rf.currentTerm, rf.state, rf.lastApplied, rf.commitIndex)
 		if rf.commitIndex > rf.lastApplied {
@@ -719,7 +720,7 @@ func (rf *Raft) startsElection() {
 							DPrintf("Sent leader heartbeat")
 						}(i)
 					}
-					rf.heartbeatTime = time.Now().Add(50 * time.Millisecond)
+					rf.heartbeatTime = time.Now().Add(100 * time.Millisecond)
 					prevLogIndex := len(rf.log) - 1
 					prevLogTerm := rf.log[prevLogIndex].Term
 					leaderCommit := rf.commitIndex
