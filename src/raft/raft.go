@@ -310,6 +310,8 @@ type AppendEntriesReply struct {
 	// Your data here (2A).
 	Term    int
 	Success bool
+	XTerm   *int
+	XIndex  *int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -327,6 +329,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.currentTerm > args.Term || !(len(rf.log) > args.PrevLogIndex && args.PrevLogTerm == rf.log[args.PrevLogIndex].Term) {
 		if rf.currentTerm == args.Term {
 			rf.heartbeatDue = time.Now().Add(getEletionTimeout())
+			if len(rf.log) > args.PrevLogIndex {
+				reply.XTerm = new(int)
+				*reply.XTerm = rf.log[args.PrevLogIndex].Term
+				for i := args.PrevLogIndex; i > 0; i-- {
+					if rf.log[i].Term != rf.log[i-1].Term {
+						reply.XIndex = new(int)
+						*reply.XIndex = i
+						break
+					}
+				}
+				if reply.XIndex == nil {
+					reply.XIndex = new(int)
+					*reply.XIndex = 0
+				}
+			} else {
+				reply.XIndex = new(int)
+				*reply.XIndex = len(rf.log)
+			}
 		}
 		reply.Success = false
 		reply.Term = rf.currentTerm
@@ -406,10 +426,14 @@ func (rf *Raft) sendHeartbeat(server, term, prevLogIndex, prevLogTerm, leaderCom
 			rf.persist()
 			return
 		} else if !reply.Success && prevLogIndex == rf.nextIndex[server]-1 {
-			DPrintf("Leader %d[term %d] enconter log inconsistency at index %d follower %d[term %d] heartbeat, decreasing to %d", rf.me, args.Term, prevLogIndex, server, reply.Term, rf.nextIndex[server]-1)
-			for rf.log[rf.nextIndex[server]-1].Term == args.PrevLogTerm {
-				rf.nextIndex[server]--
+			if reply.XIndex != nil && reply.XTerm == nil {
+				rf.nextIndex[server] = *reply.XIndex
+			} else {
+				for reply.XTerm != nil && reply.XIndex != nil && rf.nextIndex[server] > *reply.XIndex && rf.log[rf.nextIndex[server]-1].Term != *reply.XTerm {
+					rf.nextIndex[server]--
+				}
 			}
+			DPrintf("Leader %d[term %d] enconter log inconsistency at index %d follower %d[term %d] reply %v heartbeat, decreasing to %d", rf.me, args.Term, prevLogIndex, server, reply.Term, reply, rf.nextIndex[server]-1)
 			go func() {
 				DPrintf("Sending")
 				rf.sendAppendEntriesCond[server].Broadcast()
@@ -504,10 +528,14 @@ func (rf *Raft) appendEntriesHandler() {
 								}
 							}
 						} else {
-							for rf.nextIndex[server] > 1 && rf.log[rf.nextIndex[server]-1].Term == args.PrevLogTerm {
-								rf.nextIndex[server]--
+							if reply.XIndex != nil && reply.XTerm == nil {
+								rf.nextIndex[server] = *reply.XIndex
+							} else {
+								for reply.XTerm != nil && reply.XIndex != nil && rf.nextIndex[server] > *reply.XIndex && rf.log[rf.nextIndex[server]-1].Term != *reply.XTerm {
+									rf.nextIndex[server]--
+								}
 							}
-							DPrintf("Leader %d enconter log inconsistency at index %d follower %d, decreasing to %d", rf.me, prevLogIndex, server, rf.nextIndex[server]-1)
+							DPrintf("Leader %d enconter log inconsistency at index %d follower %d reply %v, decreasing to %d", rf.me, prevLogIndex, server, reply, rf.nextIndex[server]-1)
 						}
 					}
 				}(server, term, nextIndex[server]-1)
